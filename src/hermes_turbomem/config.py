@@ -27,6 +27,10 @@ class TurbomemConfig:
         return self.data_dir / "metadata.db"
 
     @property
+    def catalog_path(self) -> Path:
+        return self.data_dir / "catalog.db"
+
+    @property
     def config_path(self) -> Path:
         return self.data_dir / CONFIG_FILENAME
 
