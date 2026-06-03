@@ -8,6 +8,7 @@ from typing import Literal
 import numpy as np
 from turbovec import IdMapIndex
 
+from hermes_turbomem.call_graph import CallEdge, extract_edges
 from hermes_turbomem.code_index import extract_chunks, file_content_hash, iter_source_files
 from hermes_turbomem.config import TurbomemConfig
 from hermes_turbomem.embedder import Embedder
@@ -54,6 +55,18 @@ class MemoryStore:
                 content_hash TEXT NOT NULL,
                 PRIMARY KEY (project_id, path)
             );
+            CREATE TABLE IF NOT EXISTS call_edges (
+                project_id TEXT NOT NULL,
+                path TEXT NOT NULL,
+                caller_symbol TEXT NOT NULL,
+                callee TEXT NOT NULL,
+                caller_start_line INTEGER NOT NULL,
+                caller_end_line INTEGER NOT NULL,
+                callee_line INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_call_edges_project ON call_edges(project_id);
+            CREATE INDEX IF NOT EXISTS idx_call_edges_caller ON call_edges(project_id, caller_symbol);
+            CREATE INDEX IF NOT EXISTS idx_call_edges_callee ON call_edges(project_id, callee);
             """
         )
         self._conn.commit()
@@ -172,6 +185,10 @@ class MemoryStore:
                         self._index.remove(oid)
                     self._conn.execute("DELETE FROM entries WHERE id = ?", (oid,))
                     removed += 1
+                self._conn.execute(
+                    "DELETE FROM call_edges WHERE project_id = ? AND path = ?",
+                    (info.project_id, rel),
+                )
 
             chunks = extract_chunks(file_path, root)
             batch_ids: list[int] = []
@@ -204,6 +221,27 @@ class MemoryStore:
                 added += 1
             if batch_ids:
                 self._insert_vectors(batch_ids, batch_texts)
+
+            edges = extract_edges(file_path, raw)
+            if edges:
+                for edge in edges:
+                    self._conn.execute(
+                        """
+                        INSERT INTO call_edges (
+                            project_id, path, caller_symbol, callee,
+                            caller_start_line, caller_end_line, callee_line
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            info.project_id,
+                            rel,
+                            edge.caller_symbol,
+                            edge.callee,
+                            edge.caller_start_line,
+                            edge.caller_end_line,
+                            edge.callee_line,
+                        ),
+                    )
 
             self._conn.execute(
                 """
@@ -305,6 +343,77 @@ class MemoryStore:
             f"[experience | {cat}{proj} | score {score:.3f}]\n"
             f"{row['text']}"
         )
+
+    def code_call_graph(
+        self,
+        name: str,
+        direction: str = "callees",
+        project_id: str | None = None,
+        project_path: str | None = None,
+    ) -> str:
+        from hermes_turbomem.call_graph import SUPPORTED_LANGUAGES
+        from hermes_turbomem.code_index import TS_LANGUAGE_MAP
+
+        if direction not in ("callers", "callees"):
+            return f"Invalid direction '{direction}'. Use 'callers' or 'callees'."
+
+        if project_path and not project_id:
+            project_id = resolve_project(project_path).project_id
+
+        sym_row = self._conn.execute(
+            """
+            SELECT path FROM entries
+            WHERE symbol = ? AND entry_type = 'code'
+                AND (? IS NULL OR project_id = ?)
+            LIMIT 1
+            """,
+            (name, project_id, project_id),
+        ).fetchone()
+        if sym_row is not None:
+            ext = Path(sym_row["path"]).suffix.lower()
+            lang = TS_LANGUAGE_MAP.get(ext)
+            if lang is None or lang not in SUPPORTED_LANGUAGES:
+                supported = ", ".join(sorted(SUPPORTED_LANGUAGES))
+                return (
+                    f"Call graph not supported for '{sym_row['path']}' "
+                    f"(language: {lang or 'unknown'}). "
+                    f"Supported languages: {supported}."
+                )
+
+        if direction == "callees":
+            rows = self._conn.execute(
+                """
+                SELECT callee, path, callee_line, caller_symbol, caller_start_line, caller_end_line
+                FROM call_edges
+                WHERE caller_symbol = ? AND (? IS NULL OR project_id = ?)
+                ORDER BY callee
+                """,
+                (name, project_id, project_id),
+            ).fetchall()
+            if not rows:
+                return f"No callees found for '{name}'."
+            lines = ["Callees:"]
+            for r in rows:
+                loc = f"{r['path']}:{r['callee_line']}" if r['callee_line'] else r['path']
+                lines.append(f"  {r['callee']} @ {loc}")
+            return "\n".join(lines)
+
+        rows = self._conn.execute(
+            """
+            SELECT caller_symbol, path, caller_start_line, caller_end_line
+            FROM call_edges
+            WHERE callee = ? AND (? IS NULL OR project_id = ?)
+            ORDER BY caller_symbol
+            """,
+            (name, project_id, project_id),
+        ).fetchall()
+        if not rows:
+            return f"No callers found for '{name}'."
+        lines = ["Callers:"]
+        for r in rows:
+            loc = f"{r['path']}:{r['caller_start_line']}-{r['caller_end_line']}"
+            lines.append(f"  {r['caller_symbol']} @ {loc}")
+        return "\n".join(lines)
 
     def list_projects(self) -> str:
         rows = self._conn.execute(

@@ -60,6 +60,28 @@ def list_projects() -> str:
     return _store.list_projects()
 
 
+@mcp.tool()
+def code_call_graph(
+    name: str,
+    direction: str = "callees",
+    project_path: str | None = None,
+    project_id: str | None = None,
+) -> str:
+    """
+    Return callers or callees for a given symbol name.
+    direction: 'callers' (who calls this symbol) or 'callees' (what does this symbol call).
+    Optionally filter by project_path or project_id.
+    """
+    resolved_id = project_id
+    if project_path and not resolved_id:
+        resolved_id = resolve_project(project_path).project_id
+    return _store.code_call_graph(
+        name=name,
+        direction=direction,
+        project_id=resolved_id,
+    )
+
+
 def main() -> None:
     mcp.run(transport="stdio")
 
