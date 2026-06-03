@@ -3,25 +3,30 @@ from __future__ import annotations
 import sqlite3
 import time
 from pathlib import Path
-from typing import Literal
 
 import numpy as np
 from turbovec import IdMapIndex
 
-from hermes_turbomem.code_index import extract_chunks, file_content_hash, iter_source_files
+from hermes_turbomem.code_index import (
+    extract_chunks,
+    file_content_hash,
+    iter_indexable_files,
+)
 from hermes_turbomem.config import TurbomemConfig
 from hermes_turbomem.embedder import Embedder
 from hermes_turbomem.project_id import ProjectInfo, resolve_project
 
-EntryType = Literal["experience", "code"]
 
-
-class MemoryStore:
-    def __init__(self, config: TurbomemConfig, embedder: Embedder) -> None:
-        self.config = config
-        self.embedder = embedder
-        self.config.data_dir.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(self.config.db_path)
+class ProjectIndex:
+    def __init__(self, project_info: ProjectInfo, embedder: Embedder, config: TurbomemConfig) -> None:
+        self._project_info = project_info
+        self._embedder = embedder
+        self._config = config
+        self._index_dir = project_info.root / ".turbomem"
+        self._index_dir.mkdir(parents=True, exist_ok=True)
+        self._db_path = self._index_dir / "project_index.db"
+        self._tvim_path = self._index_dir / "index.tvim"
+        self._conn = sqlite3.connect(str(self._db_path))
         self._conn.row_factory = sqlite3.Row
         self._init_schema()
         self._index = self._load_index()
@@ -30,190 +35,179 @@ class MemoryStore:
     def _init_schema(self) -> None:
         self._conn.executescript(
             """
-            CREATE TABLE IF NOT EXISTS entries (
+            CREATE TABLE IF NOT EXISTS code_entries (
                 id INTEGER PRIMARY KEY,
-                entry_type TEXT NOT NULL,
-                project_id TEXT,
-                text TEXT NOT NULL,
-                category TEXT,
-                path TEXT,
-                symbol TEXT,
-                start_line INTEGER,
-                end_line INTEGER,
-                created_at REAL NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS projects (
-                project_id TEXT PRIMARY KEY,
-                root_path TEXT NOT NULL,
-                git_remote TEXT,
-                indexed_at REAL
-            );
-            CREATE TABLE IF NOT EXISTS file_hashes (
                 project_id TEXT NOT NULL,
                 path TEXT NOT NULL,
+                symbol TEXT,
+                start_line INTEGER NOT NULL,
+                end_line INTEGER NOT NULL,
+                content TEXT NOT NULL,
                 content_hash TEXT NOT NULL,
-                PRIMARY KEY (project_id, path)
+                created_at REAL NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS file_hashes (
+                path TEXT PRIMARY KEY,
+                content_hash TEXT NOT NULL,
+                updated_at REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_entries_path ON code_entries(path);
+            CREATE INDEX IF NOT EXISTS idx_entries_project ON code_entries(project_id);
             """
         )
         self._conn.commit()
 
     def _load_index(self) -> IdMapIndex:
-        if self.config.index_path.is_file():
-            return IdMapIndex.load(str(self.config.index_path))
-        return IdMapIndex(bit_width=self.config.bit_width)
+        if self._tvim_path.is_file():
+            return IdMapIndex.load(str(self._tvim_path))
+        return IdMapIndex(bit_width=self._config.bit_width)
 
     def _allocate_next_id(self) -> int:
-        row = self._conn.execute("SELECT COALESCE(MAX(id), 0) FROM entries").fetchone()
-        max_sqlite = int(row[0])
-        return max(max_sqlite + 1, 1)
+        row = self._conn.execute("SELECT COALESCE(MAX(id), 0) FROM code_entries").fetchone()
+        return max(int(row[0]) + 1, 1)
 
     def _persist_index(self) -> None:
-        self._index.write(str(self.config.index_path))
+        self._index.write(str(self._tvim_path))
 
     def _ensure_index(self) -> None:
         if self._index.dim is None:
-            self._index = IdMapIndex(dim=self.embedder.dimension, bit_width=self.config.bit_width)
+            self._index = IdMapIndex(dim=self._embedder.dimension, bit_width=self._config.bit_width)
 
-    def _insert_vectors(self, entry_ids: list[int], texts: list[str]) -> None:
-        if not texts:
-            return
-        self._ensure_index()
-        vectors = self.embedder.encode(texts)
-        self._index.add_with_ids(
-            vectors,
-            np.array(entry_ids, dtype=np.uint64),
-        )
+    def index_file(self, file_path: Path, root: Path) -> tuple[int, int]:
+        rel = file_path.relative_to(root).as_posix()
+        try:
+            raw = file_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return 0, 1
 
-    def _insert_vector(self, entry_id: int, text: str) -> None:
-        self._insert_vectors([entry_id], [text])
-        self._persist_index()
-
-    def is_project_indexed(self, project_id: str) -> bool:
+        whole_hash = file_content_hash(raw)
         row = self._conn.execute(
-            "SELECT 1 FROM projects WHERE project_id = ? AND indexed_at IS NOT NULL",
-            (project_id,),
+            "SELECT content_hash FROM file_hashes WHERE path = ?",
+            (rel,),
         ).fetchone()
-        return row is not None
+        if row and row["content_hash"] == whole_hash:
+            return 0, 1
 
-    def maybe_auto_index(self, project_path: str | None) -> str | None:
-        if not project_path or not self.config.auto_index_on_first_use:
-            return None
-        info = resolve_project(project_path)
-        if self.is_project_indexed(info.project_id):
-            return None
-        return self.index_project(project_path)
-
-    def remember(
-        self,
-        text: str,
-        category: str = "general",
-        project_path: str | None = None,
-    ) -> str:
-        self.maybe_auto_index(project_path)
-        project_id = None
-        if project_path:
-            project_id = resolve_project(project_path).project_id
-
-        entry_id = self._next_id
-        self._next_id += 1
-        now = time.time()
-        self._conn.execute(
-            """
-            INSERT INTO entries (id, entry_type, project_id, text, category, created_at)
-            VALUES (?, 'experience', ?, ?, ?, ?)
-            """,
-            (entry_id, project_id, text.strip(), category, now),
-        )
-        self._conn.commit()
-        self._insert_vector(entry_id, text.strip())
-        return f"Stored experience #{entry_id}" + (f" for project {project_id}" if project_id else "")
-
-    def index_project(self, path: str, force: bool = False) -> str:
-        info = resolve_project(path)
-        root = info.root
-        if not root.is_dir():
-            return f"Project root not found: {root}"
-
-        files = iter_source_files(root)
-        added = 0
-        skipped = 0
+        old = self._conn.execute(
+            "SELECT id FROM code_entries WHERE path = ?",
+            (rel,),
+        ).fetchall()
         removed = 0
+        for old_row in old:
+            oid = int(old_row["id"])
+            if self._index.contains(oid):
+                self._index.remove(oid)
+            self._conn.execute("DELETE FROM code_entries WHERE id = ?", (oid,))
+            removed += 1
 
-        for file_path in files:
-            rel = file_path.relative_to(root).as_posix()
-            try:
-                raw = file_path.read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError):
-                skipped += 1
-                continue
-
-            whole_hash = file_content_hash(raw)
-            if not force:
-                row = self._conn.execute(
-                    "SELECT content_hash FROM file_hashes WHERE project_id = ? AND path = ?",
-                    (info.project_id, rel),
-                ).fetchone()
-                if row and row["content_hash"] == whole_hash:
-                    skipped += 1
-                    continue
-
-            if not force:
-                old = self._conn.execute(
-                    """
-                    SELECT id FROM entries
-                    WHERE project_id = ? AND entry_type = 'code' AND path = ?
-                    """,
-                    (info.project_id, rel),
-                ).fetchall()
-                for old_row in old:
-                    oid = int(old_row["id"])
-                    if self._index.contains(oid):
-                        self._index.remove(oid)
-                    self._conn.execute("DELETE FROM entries WHERE id = ?", (oid,))
-                    removed += 1
-
-            chunks = extract_chunks(file_path, root)
-            batch_ids: list[int] = []
-            batch_texts: list[str] = []
-            now = time.time()
-            for chunk in chunks:
-                entry_id = self._next_id
-                self._next_id += 1
-                embed_text = f"{chunk.symbol}\n{chunk.text}" if chunk.symbol else chunk.text
-                self._conn.execute(
-                    """
-                    INSERT INTO entries (
-                        id, entry_type, project_id, text, path, symbol,
-                        start_line, end_line, created_at
-                    ) VALUES (?, 'code', ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        entry_id,
-                        info.project_id,
-                        chunk.text,
-                        chunk.path,
-                        chunk.symbol,
-                        chunk.start_line,
-                        chunk.end_line,
-                        now,
-                    ),
-                )
-                batch_ids.append(entry_id)
-                batch_texts.append(embed_text)
-                added += 1
-            if batch_ids:
-                self._insert_vectors(batch_ids, batch_texts)
-
+        chunks = extract_chunks(file_path, root)
+        batch_ids: list[int] = []
+        batch_texts: list[str] = []
+        now = time.time()
+        for chunk in chunks:
+            entry_id = self._next_id
+            self._next_id += 1
+            embed_text = f"{chunk.symbol}\n{chunk.text}" if chunk.symbol else chunk.text
             self._conn.execute(
                 """
-                INSERT INTO file_hashes (project_id, path, content_hash)
-                VALUES (?, ?, ?)
-                ON CONFLICT(project_id, path) DO UPDATE SET content_hash = excluded.content_hash
+                INSERT INTO code_entries (
+                    id, project_id, path, symbol,
+                    start_line, end_line, content, content_hash, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (info.project_id, rel, whole_hash),
+                (
+                    entry_id,
+                    self._project_info.project_id,
+                    chunk.path,
+                    chunk.symbol,
+                    chunk.start_line,
+                    chunk.end_line,
+                    chunk.text,
+                    chunk.content_hash,
+                    now,
+                ),
+            )
+            batch_ids.append(entry_id)
+            batch_texts.append(embed_text)
+
+        if batch_ids:
+            self._ensure_index()
+            vectors = self._embedder.encode(batch_texts)
+            self._index.add_with_ids(
+                vectors,
+                np.array(batch_ids, dtype=np.uint64),
             )
 
+        self._conn.execute(
+            """
+            INSERT INTO file_hashes (path, content_hash, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(path) DO UPDATE SET
+                content_hash = excluded.content_hash,
+                updated_at = excluded.updated_at
+            """,
+            (rel, whole_hash, now),
+        )
+        self._conn.commit()
+        self._persist_index()
+
+        added = len(batch_ids)
+        return added, removed
+
+    def search(
+        self,
+        query_vec: np.ndarray,
+        k: int,
+    ) -> list[tuple[float, dict]]:
+        if len(self._index) == 0:
+            return []
+        scores, ids = self._index.search(query_vec, k=k)
+        results: list[tuple[float, dict]] = []
+        for score, entry_id in zip(scores[0].tolist(), ids[0].tolist(), strict=False):
+            row = self._conn.execute(
+                "SELECT * FROM code_entries WHERE id = ?",
+                (int(entry_id),),
+            ).fetchone()
+            if row is None:
+                continue
+            results.append((float(score), dict(row)))
+        return results
+
+    @property
+    def size(self) -> int:
+        return len(self._index)
+
+    def entry_count(self) -> int:
+        row = self._conn.execute("SELECT COUNT(*) FROM code_entries").fetchone()
+        return int(row[0])
+
+    def close(self) -> None:
+        self._conn.close()
+
+
+class Catalog:
+    def __init__(self, config: TurbomemConfig) -> None:
+        self._config = config
+        config.data_dir.mkdir(parents=True, exist_ok=True)
+        self._db_path = config.catalog_path
+        self._conn = sqlite3.connect(str(self._db_path))
+        self._conn.row_factory = sqlite3.Row
+        self._init_schema()
+
+    def _init_schema(self) -> None:
+        self._conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS projects (
+                project_id TEXT PRIMARY KEY,
+                root_path TEXT NOT NULL,
+                git_remote TEXT,
+                indexed_at REAL NOT NULL
+            );
+            """
+        )
+        self._conn.commit()
+
+    def register(self, project_info: ProjectInfo) -> None:
         self._conn.execute(
             """
             INSERT INTO projects (project_id, root_path, git_remote, indexed_at)
@@ -223,101 +217,143 @@ class MemoryStore:
                 git_remote = excluded.git_remote,
                 indexed_at = excluded.indexed_at
             """,
-            (info.project_id, str(root), info.git_remote, time.time()),
+            (project_info.project_id, str(project_info.root), project_info.git_remote, time.time()),
         )
         self._conn.commit()
-        self._persist_index()
+
+    def list_projects(self) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT project_id, root_path, indexed_at FROM projects ORDER BY indexed_at DESC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_project(self, project_id: str) -> dict | None:
+        row = self._conn.execute(
+            "SELECT * FROM projects WHERE project_id = ?",
+            (project_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def get_all(self) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT project_id, root_path, indexed_at FROM projects ORDER BY indexed_at DESC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def close(self) -> None:
+        self._conn.close()
+
+
+class MemoryStore:
+    def __init__(self, config: TurbomemConfig, embedder: Embedder) -> None:
+        self.config = config
+        self.embedder = embedder
+        self.catalog = Catalog(config)
+
+    def index_codebase(self, path: str, force: bool = False) -> str:
+        info = resolve_project(path)
+        root = info.root
+        if not root.is_dir():
+            return f"Project root not found: {root}"
+
+        proj_index = ProjectIndex(info, self.embedder, self.config)
+        files = iter_indexable_files(root)
+        added = 0
+        skipped = 0
+        removed = 0
+
+        for file_path in files:
+            a, r = proj_index.index_file(file_path, root)
+            if a == 0:
+                skipped += 1
+            else:
+                added += a
+                removed += r
+
+        proj_index.close()
+        self.catalog.register(info)
 
         return (
             f"Indexed project {info.project_id} at {root}: "
-            f"{added} code entries added, {skipped} files/chunks skipped, {removed} stale entries removed."
+            f"{added} code entries added, {skipped} files skipped, {removed} stale entries removed."
         )
 
-    def _entry_row(self, entry_id: int) -> sqlite3.Row | None:
-        return self._conn.execute("SELECT * FROM entries WHERE id = ?", (entry_id,)).fetchone()
-
-    def recall(
+    def code_recall(
         self,
         query: str,
         limit: int | None = None,
         project_id: str | None = None,
-        types: list[str] | None = None,
         project_path: str | None = None,
     ) -> str:
-        self.maybe_auto_index(project_path)
         if not query.strip():
             return "Query is empty."
 
         k = limit or self.config.default_recall_limit
-        if len(self._index) == 0:
-            return "Persistent memory is empty. Use remember() or index_project() first."
-
         query_vec = self.embedder.encode([query.strip()])
-        allowlist: np.ndarray | None = None
-        if project_id or types:
-            clauses = ["1=1"]
-            params: list[object] = []
-            if project_id:
-                clauses.append("project_id = ?")
-                params.append(project_id)
-            if types:
-                placeholders = ",".join("?" for _ in types)
-                clauses.append(f"entry_type IN ({placeholders})")
-                params.extend(types)
-            rows = self._conn.execute(
-                f"SELECT id FROM entries WHERE {' AND '.join(clauses)}",
-                params,
-            ).fetchall()
-            if not rows:
-                return "No entries match the requested filters."
-            allowlist = np.array([int(r["id"]) for r in rows], dtype=np.uint64)
 
-        scores, ids = self._index.search(query_vec, k=k, allowlist=allowlist)
-        if ids.size == 0:
-            return "No matching memories found."
+        projects = self.catalog.get_all()
+        if not projects:
+            return "No projects indexed yet. Use index_codebase(path) first."
+
+        if project_path and not project_id:
+            resolved = resolve_project(project_path)
+            project_id = resolved.project_id
+
+        candidates: list[tuple[float, dict, str]] = []
+
+        for proj in projects:
+            pid = proj["project_id"]
+            if project_id and pid != project_id:
+                continue
+
+            root_path = Path(proj["root_path"])
+            info = ProjectInfo(project_id=pid, root=root_path, git_remote=proj.get("git_remote"))
+            proj_index = ProjectIndex(info, self.embedder, self.config)
+            try:
+                results = proj_index.search(query_vec, k)
+                proj_index.close()
+            except KeyError:
+                proj_index.close()
+                continue
+            for score, entry in results:
+                candidates.append((score, entry, pid))
+
+        candidates.sort(key=lambda x: -x[0])
+        top = candidates[:k]
+
+        if not top:
+            return (
+                "No matching code entries found. "
+                "Use index_status to check index health, or re-run index_codebase."
+            )
 
         lines: list[str] = []
-        for score, entry_id in zip(scores[0].tolist(), ids[0].tolist(), strict=False):
-            row = self._entry_row(int(entry_id))
-            if row is None:
-                continue
-            lines.append(self._format_hit(row, float(score)))
-
-        if not lines:
-            return "No matching memories found."
+        for score, entry, pid in top:
+            lines.append(self._format_hit(entry, pid, score))
         return "\n\n".join(lines)
 
-    def _format_hit(self, row: sqlite3.Row, score: float) -> str:
-        entry_type = row["entry_type"]
-        if entry_type == "code":
-            proj = row["project_id"] or "unknown"
-            sym = row["symbol"] or "(file)"
-            loc = f"{row['path']}:{row['start_line']}-{row['end_line']}"
-            preview = (row["text"] or "")[:400]
-            return (
-                f"[code | {proj} | score {score:.3f}]\n"
-                f"{sym} @ {loc}\n"
-                f"{preview}"
-            )
-        cat = row["category"] or "general"
-        proj = f" | {row['project_id']}" if row["project_id"] else ""
+    def _format_hit(self, entry: dict, project_id: str, score: float) -> str:
+        sym = entry.get("symbol") or "(file)"
+        path = entry.get("path", "")
+        start = entry.get("start_line", 0)
+        end = entry.get("end_line", 0)
+        preview = (entry.get("content") or "")[:400]
         return (
-            f"[experience | {cat}{proj} | score {score:.3f}]\n"
-            f"{row['text']}"
+            f"[code | {project_id} | score {score:.3f}]\n"
+            f"{sym} @ {path}:{start}-{end}\n"
+            f"{preview}"
         )
 
-    def list_projects(self) -> str:
-        rows = self._conn.execute(
-            "SELECT project_id, root_path, indexed_at FROM projects ORDER BY indexed_at DESC"
-        ).fetchall()
-        if not rows:
+    def list_code_projects(self) -> str:
+        projects = self.catalog.list_projects()
+        if not projects:
             return "No projects indexed yet."
         lines = []
-        for row in rows:
+        for proj in projects:
             when = (
-                time.strftime("%Y-%m-%d %H:%M", time.localtime(row["indexed_at"]))
-                if row["indexed_at"]
+                time.strftime("%Y-%m-%d %H:%M", time.localtime(proj["indexed_at"]))
+                if proj.get("indexed_at")
                 else "never"
             )
-            lines.append(f"- {row['project_id']}\n  root: {row['root_path']}\n  indexed: {when}")
+            lines.append(f"- {proj['project_id']}\n  root: {proj['root_path']}\n  indexed: {when}")
         return "\n".join(lines)

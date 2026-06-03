@@ -1,0 +1,4 @@
+*.log
+ignored_file.py
+node_modules/
+dist/

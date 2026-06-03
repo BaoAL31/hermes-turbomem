@@ -4,7 +4,6 @@ from mcp.server.fastmcp import FastMCP
 
 from hermes_turbomem.config import load_config
 from hermes_turbomem.embedder import Embedder
-from hermes_turbomem.project_id import resolve_project
 from hermes_turbomem.store import MemoryStore
 
 mcp = FastMCP("hermes-turbomem")
@@ -15,49 +14,34 @@ _store = MemoryStore(_config, _embedder)
 
 
 @mcp.tool()
-def remember(
-    text: str,
-    category: str = "general",
-    project_path: str | None = None,
-) -> str:
-    """Store a learned fact, preference, fix, or convention in persistent memory."""
-    return _store.remember(text=text, category=category, project_path=project_path)
+def index_codebase(path: str, force: bool = False) -> str:
+    """Index a project root: parse code symbols, embed, and store Code Entries."""
+    return _store.index_codebase(path=path, force=force)
 
 
 @mcp.tool()
-def index_project(path: str, force: bool = False) -> str:
-    """Index a project directory: parse code symbols, embed, and store Code Entries."""
-    return _store.index_project(path=path, force=force)
-
-
-@mcp.tool()
-def recall_memory(
+def code_recall(
     query: str,
     limit: int | None = None,
-    project_path: str | None = None,
     project_id: str | None = None,
-    types: list[str] | None = None,
+    project_path: str | None = None,
 ) -> str:
     """
-    Unified semantic recall over experiences and code entries across all indexed projects.
-    Optional filters: project_id, types (experience, code), or project_path for auto-index.
+    Semantic recall over Code Entries across all indexed projects.
+    Optional filters: project_id, or project_path to narrow scope.
     """
-    resolved_id = project_id
-    if project_path and not resolved_id:
-        resolved_id = resolve_project(project_path).project_id
-    return _store.recall(
+    return _store.code_recall(
         query=query,
         limit=limit,
-        project_id=resolved_id,
-        types=types,
+        project_id=project_id,
         project_path=project_path,
     )
 
 
 @mcp.tool()
-def list_projects() -> str:
+def list_code_projects() -> str:
     """List indexed projects and their root paths."""
-    return _store.list_projects()
+    return _store.list_code_projects()
 
 
 def main() -> None:
