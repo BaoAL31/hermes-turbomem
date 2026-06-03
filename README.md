@@ -4,21 +4,19 @@ Local MCP **code memory** for [Hermes Agent](https://github.com/NousResearch/her
 
 - **Domain glossary:** [CONTEXT.md](./CONTEXT.md)
 - **Architecture:** [docs/adr/0001-global-code-memory-complement.md](./docs/adr/0001-global-code-memory-complement.md)
-- **PRD (v1):** [docs/PRD-v1-global-code-memory-mcp.md](./docs/PRD-v1-global-code-memory-mcp.md) · [GitHub issue #1](https://github.com/BaoAL31/hermes-turbomem/issues/1)
+- **PRD (v1):** [docs/PRD-v1-global-code-memory-mcp.md](./docs/PRD-v1-global-code-memory-mcp.md)
 
-> The Python scaffold in this repo predates the PRD; implement against the PRD and CONTEXT, not the old tool names below.
-
-## MCP tools (v1 target — see PRD)
+## MCP tools (v1)
 
 | Tool | Purpose |
 |------|---------|
+| `preload_models` | Download/cache embedding weights before offline use |
 | `index_codebase` | Index a project root |
 | `code_recall` | Hybrid search across the catalog |
 | `code_peek` | Metadata-only hits |
 | `code_call_graph` | Callers / callees |
 | `list_code_projects` | List indexed projects |
 | `index_status` / `index_health_check` / `index_logs` / `index_metrics` | Diagnostics |
-| `preload_models` | Cache embedding weights offline |
 
 ## Install
 
@@ -29,22 +27,25 @@ python -m venv .venv
 pip install -e ".[index]"
 ```
 
-First run downloads the embedding model (`nomic-ai/nomic-embed-text-v1` by default).
+First run downloads the embedding model (`nomic-ai/nomic-embed-text-v1` by default). To pre-cache before offline use, run:
+
+```bash
+python -m hermes_turbomem.server --preload
+```
+or call the `preload_models()` tool after the server starts.
 
 ## Hermes configuration
 
-Add to `~/.hermes/config.yaml`:
+Copy-paste into `~/.hermes/config.yaml`:
 
 ```yaml
 mcp_servers:
   turbomem:
     command: python
     args: ["-m", "hermes_turbomem.server"]
-    env:
-      TURBOMEM_DATA_DIR: "C:/Users/you/.hermes/turbomem"
 ```
 
-Or after `pip install -e .`:
+After `pip install -e .`, or for faster startup:
 
 ```yaml
 mcp_servers:
@@ -56,7 +57,7 @@ Reload in Hermes: `/reload-mcp`.
 
 ## Server config
 
-`~/.hermes/turbomem/config.yaml` (optional):
+`~/.hermes/turbomem/config.yaml` (optional, all keys have defaults):
 
 ```yaml
 auto_index_on_first_use: false   # default: manual index_project only
@@ -67,17 +68,17 @@ default_recall_limit: 8
 
 ## Usage flow
 
-1. **Index a repo** (once per machine / after big changes):
+1. **Pre-cache the model** (one-time, or for offline use):
 
-   `index_project(path="C:/Users/you/Projects/myapi")`
+   `preload_models()`
 
-2. **Remember lessons**:
+2. **Index a repo** (once per machine / after big changes):
 
-   `remember(text="Use yarn not npm in myapi", category="tooling", project_path=".../myapi")`
+   `index_codebase(path="C:/Users/you/Projects/myapi")`
 
-3. **Recall anywhere**:
+3. **Recall code anywhere**:
 
-   `recall_memory(query="authenticate middleware")`
+   `code_recall(query="authenticate middleware")`
 
 ## Data layout
 

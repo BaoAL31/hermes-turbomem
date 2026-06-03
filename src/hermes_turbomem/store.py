@@ -321,3 +321,20 @@ class MemoryStore:
             )
             lines.append(f"- {row['project_id']}\n  root: {row['root_path']}\n  indexed: {when}")
         return "\n".join(lines)
+
+    def index_status(self) -> dict:
+        project_count = int(
+            self._conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0]
+        )
+        entry_count = int(
+            self._conn.execute("SELECT COUNT(*) FROM entries").fetchone()[0]
+        )
+        row = self._conn.execute("SELECT MAX(indexed_at) FROM projects").fetchone()
+        last_indexed = row[0] if row[0] is not None else None
+
+        return {
+            "data_dir": str(self.config.data_dir),
+            "projects": project_count,
+            "entries": entry_count,
+            "last_indexed": last_indexed,
+        }
