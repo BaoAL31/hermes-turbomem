@@ -1,17 +1,24 @@
 # hermes-turbomem
 
-Local MCP **Persistent Memory** for [Hermes Agent](https://github.com/NousResearch/hermes-agent): TurboQuant-compressed vectors ([turbovec](https://github.com/RyanCodrai/turbovec)) plus unified semantic **Recall** over **Experiences** and **Code Entries** — across projects, even when you are not in that repo's working directory.
+Local MCP **code memory** for [Hermes Agent](https://github.com/NousResearch/hermes-agent): TurboQuant-compressed **Code Entries** ([turbovec](https://github.com/RyanCodrai/turbovec)), hybrid **Code recall** across indexed **Projects**, complementing Hindsight (or MEMORY.md) for facts.
 
-Domain terms: [CONTEXT.md](./CONTEXT.md).
+- **Domain glossary:** [CONTEXT.md](./CONTEXT.md)
+- **Architecture:** [docs/adr/0001-global-code-memory-complement.md](./docs/adr/0001-global-code-memory-complement.md)
+- **PRD (v1):** [docs/PRD-v1-global-code-memory-mcp.md](./docs/PRD-v1-global-code-memory-mcp.md) · [GitHub issue #1](https://github.com/BaoAL31/hermes-turbomem/issues/1)
 
-## MCP tools
+> The Python scaffold in this repo predates the PRD; implement against the PRD and CONTEXT, not the old tool names below.
+
+## MCP tools (v1 target — see PRD)
 
 | Tool | Purpose |
 |------|---------|
-| `remember` | Store an experience (fact, fix, preference) |
-| `index_project` | Index a codebase (Tree-sitter when installed, regex fallback) |
-| `recall_memory` | Search all memory (optional `project_id`, `types`, `project_path`) |
-| `list_projects` | List indexed project roots |
+| `index_codebase` | Index a project root |
+| `code_recall` | Hybrid search across the catalog |
+| `code_peek` | Metadata-only hits |
+| `code_call_graph` | Callers / callees |
+| `list_code_projects` | List indexed projects |
+| `index_status` / `index_health_check` / `index_logs` / `index_metrics` | Diagnostics |
+| `preload_models` | Cache embedding weights offline |
 
 ## Install
 
