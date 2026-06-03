@@ -55,6 +55,28 @@ def recall_memory(
 
 
 @mcp.tool()
+def code_peek(
+    query: str,
+    limit: int | None = None,
+    project_path: str | None = None,
+    project_id: str | None = None,
+) -> str:
+    """
+    Metadata-only code search: returns paths, symbols, line ranges, and scores—no source bodies.
+    Uses hybrid search (vectors + BM25) and flags low-confidence results.
+    """
+    resolved_id = project_id
+    if project_path and not resolved_id:
+        resolved_id = resolve_project(project_path).project_id
+    return _store.code_peek(
+        query=query,
+        limit=limit,
+        project_id=resolved_id,
+        project_path=project_path,
+    )
+
+
+@mcp.tool()
 def list_projects() -> str:
     """List indexed projects and their root paths."""
     return _store.list_projects()
