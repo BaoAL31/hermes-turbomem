@@ -5,20 +5,24 @@ Local MCP **code memory** for [Hermes Agent](https://github.com/NousResearch/her
 - **Domain glossary:** [CONTEXT.md](./CONTEXT.md)
 - **Architecture:** [docs/adr/0001-global-code-memory-complement.md](./docs/adr/0001-global-code-memory-complement.md)
 - **PRD (v1):** [docs/PRD-v1-global-code-memory-mcp.md](./docs/PRD-v1-global-code-memory-mcp.md) · [GitHub issue #1](https://github.com/BaoAL31/hermes-turbomem/issues/1)
+- **Memory routing skill:** [docs/skills/hermes-memory-routing.md](./docs/skills/hermes-memory-routing.md)
 
-> The Python scaffold in this repo predates the PRD; implement against the PRD and CONTEXT, not the old tool names below.
-
-## MCP tools (v1 target — see PRD)
+## MCP tools (v1 complement mode)
 
 | Tool | Purpose |
 |------|---------|
-| `index_codebase` | Index a project root |
-| `code_recall` | Hybrid search across the catalog |
-| `code_peek` | Metadata-only hits |
-| `code_call_graph` | Callers / callees |
-| `list_code_projects` | List indexed projects |
-| `index_status` / `index_health_check` / `index_logs` / `index_metrics` | Diagnostics |
-| `preload_models` | Cache embedding weights offline |
+| `index_codebase` | First/full/incremental index for a project root |
+| `code_recall` | Hybrid semantic search across the project catalog |
+| `code_peek` | Metadata-only hits (path, symbol, lines — save tokens) |
+| `code_call_graph` | Callers / callees where extraction exists |
+| `list_code_projects` | List registered projects and roots |
+| `index_status` | Check readiness, chunk counts, branch, model cache |
+| `index_health_check` | Drop stale/orphan index rows |
+| `index_logs` | Filtered debug log tail |
+| `index_metrics` | Index/search timing counters |
+| `preload_models` | Download embedding weights before offline use |
+
+Not in complement v1: `remember`, `reflect`, fact consolidation.
 
 ## Install
 
@@ -54,12 +58,12 @@ mcp_servers:
 
 Reload in Hermes: `/reload-mcp`.
 
-## Server config
+## Config
 
 `~/.hermes/turbomem/config.yaml` (optional):
 
 ```yaml
-auto_index_on_first_use: false   # default: manual index_project only
+auto_index_on_first_use: false   # default: manual index_codebase only
 embedding_model: nomic-ai/nomic-embed-text-v1
 bit_width: 4
 default_recall_limit: 8
@@ -69,15 +73,23 @@ default_recall_limit: 8
 
 1. **Index a repo** (once per machine / after big changes):
 
-   `index_project(path="C:/Users/you/Projects/myapi")`
+   `index_codebase(path="C:/Users/you/Projects/myapi")`
 
-2. **Remember lessons**:
+2. **Search code from anywhere**:
 
-   `remember(text="Use yarn not npm in myapi", category="tooling", project_path=".../myapi")`
+   `code_recall(query="authenticate middleware")`
 
-3. **Recall anywhere**:
+3. **Peek without source body** (saves tokens):
 
-   `recall_memory(query="authenticate middleware")`
+   `code_peek(query="validate_user")`
+
+4. **Trace call graph**:
+
+   `code_call_graph(name="validate_user", direction="callers", project_path="C:/Users/you/Projects/myapi")`
+
+5. **Check diagnostics**:
+
+   `index_status(project_path="C:/Users/you/Projects/myapi")`
 
 ## Data layout
 
@@ -88,9 +100,20 @@ default_recall_limit: 8
 └── metadata.db     # entry text, paths, project ids
 ```
 
+Per-project indexes live under `{repo}/.turbomem/`.
+
 ## Project identity
 
 Projects are keyed by **git remote** when available, else **`local:{canonical path}`** — so the same clone path or remote resolves to one bank.
+
+## Memory routing
+
+hermes-turbomem runs in **complement mode**: facts belong to Hindsight (or MEMORY.md), code locations belong to turbomem. Install the [memory routing skill](./docs/skills/hermes-memory-routing.md) to teach your agent which tool to use:
+
+```bash
+mkdir -p ~/.hermes/skills
+cp docs/skills/hermes-memory-routing.md ~/.hermes/skills/hermes-memory-routing.md
+```
 
 ## License
 

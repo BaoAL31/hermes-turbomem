@@ -12,6 +12,9 @@ class Embedder:
     def dimension(self) -> int:
         return int(self._model.get_sentence_embedding_dimension())
 
+    def preload(self) -> None:
+        _ = self._model.get_sentence_embedding_dimension()
+
     def encode(self, texts: list[str]) -> np.ndarray:
         vectors = self._model.encode(texts, normalize_embeddings=True)
         return np.asarray(vectors, dtype=np.float32)
