@@ -3,3 +3,5 @@ auto_index_on_first_use: false
 embedding_model: nomic-ai/nomic-embed-text-v1
 bit_width: 4
 default_recall_limit: 8
+watch_enabled: true
+watch_poll_interval: 2.0
