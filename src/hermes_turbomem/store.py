@@ -10,6 +10,7 @@ from turbovec import IdMapIndex
 
 from hermes_turbomem.code_index import extract_chunks, file_content_hash, iter_source_files
 from hermes_turbomem.config import TurbomemConfig
+from hermes_turbomem.diagnostics import get_logger, get_metrics
 from hermes_turbomem.embedder import Embedder
 from hermes_turbomem.project_id import ProjectInfo, resolve_project
 
@@ -20,6 +21,8 @@ class MemoryStore:
     def __init__(self, config: TurbomemConfig, embedder: Embedder) -> None:
         self.config = config
         self.embedder = embedder
+        self._log = get_logger()
+        self._metrics = get_metrics()
         self.config.data_dir.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(self.config.db_path)
         self._conn.row_factory = sqlite3.Row
@@ -130,11 +133,13 @@ class MemoryStore:
         return f"Stored experience #{entry_id}" + (f" for project {project_id}" if project_id else "")
 
     def index_project(self, path: str, force: bool = False) -> str:
+        t0 = time.time()
         info = resolve_project(path)
         root = info.root
         if not root.is_dir():
             return f"Project root not found: {root}"
 
+        self._log.log("index", "INFO", f"Starting index of {info.project_id} at {root}")
         files = iter_source_files(root)
         added = 0
         skipped = 0
@@ -144,7 +149,8 @@ class MemoryStore:
             rel = file_path.relative_to(root).as_posix()
             try:
                 raw = file_path.read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError):
+            except (OSError, UnicodeDecodeError) as exc:
+                self._log.log("parse", "WARN", f"Failed to read {rel}: {exc}")
                 skipped += 1
                 continue
 
@@ -228,6 +234,15 @@ class MemoryStore:
         self._conn.commit()
         self._persist_index()
 
+        elapsed_ms = (time.time() - t0) * 1000
+        self._metrics.record_timing("index", elapsed_ms)
+        self._log.log(
+            "index",
+            "INFO",
+            f"Indexed {info.project_id}: {added} added, {skipped} skipped, "
+            f"{removed} removed in {elapsed_ms:.0f}ms",
+        )
+
         return (
             f"Indexed project {info.project_id} at {root}: "
             f"{added} code entries added, {skipped} files/chunks skipped, {removed} stale entries removed."
@@ -237,6 +252,21 @@ class MemoryStore:
         return self._conn.execute("SELECT * FROM entries WHERE id = ?", (entry_id,)).fetchone()
 
     def recall(
+        self,
+        query: str,
+        limit: int | None = None,
+        project_id: str | None = None,
+        types: list[str] | None = None,
+        project_path: str | None = None,
+    ) -> str:
+        t0 = time.time()
+        try:
+            return self._recall_impl(query, limit, project_id, types, project_path)
+        finally:
+            elapsed_ms = (time.time() - t0) * 1000
+            self._metrics.record_timing("search", elapsed_ms)
+
+    def _recall_impl(
         self,
         query: str,
         limit: int | None = None,

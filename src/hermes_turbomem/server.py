@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import time
+
 from mcp.server.fastmcp import FastMCP
 
 from hermes_turbomem.config import load_config
+from hermes_turbomem.diagnostics import get_logger, get_metrics
 from hermes_turbomem.embedder import Embedder
 from hermes_turbomem.project_id import resolve_project
 from hermes_turbomem.store import MemoryStore
@@ -58,6 +61,50 @@ def recall_memory(
 def list_projects() -> str:
     """List indexed projects and their root paths."""
     return _store.list_projects()
+
+
+@mcp.tool()
+def index_logs(
+    category: str | None = None,
+    level: str | None = None,
+    limit: int = 50,
+) -> str:
+    """Return recent log lines; optionally filter by category and level.
+    Categories: index, search, embed, parse, store, project, config, general.
+    Levels: DEBUG, INFO, WARN, ERROR.
+    """
+    logger = get_logger()
+    entries = logger.get_logs(
+        category=category,  # type: ignore[arg-type]
+        level=level,  # type: ignore[arg-type]
+        limit=limit,
+    )
+    if not entries:
+        return "No log entries found."
+    lines: list[str] = []
+    for e in entries:
+        ts = time.strftime("%H:%M:%S", time.localtime(e.timestamp))
+        lines.append(f"[{ts}] [{e.level}] [{e.category}] {e.message}")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def index_metrics() -> str:
+    """Return per-process-lifetime counters and timings for index, embed, search.
+    Metrics reset on process restart. Accumulate until then.
+    """
+    m = get_metrics().snapshot()
+    return (
+        f"Embed calls: {m['embed_call_count']}\n"
+        f"Index runs: {m['index_run_count']}\n"
+        f"Search calls: {m['search_call_count']}\n"
+        f"Parse errors: {m['parse_error_count']}\n"
+        f"Embed errors: {m['embed_error_count']}\n"
+        f"Total index duration: {m['total_index_duration_ms']:.0f} ms\n"
+        f"Total search duration: {m['total_search_duration_ms']:.0f} ms\n"
+        "\nMetrics reset on process restart. Timings and counters"
+        " accumulate for the lifetime of this process."
+    )
 
 
 def main() -> None:

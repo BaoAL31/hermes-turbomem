@@ -5,6 +5,11 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from hermes_turbomem.diagnostics import get_logger, get_metrics
+
+_log = get_logger()
+_metrics = get_metrics()
+
 CODE_EXTENSIONS = {
     ".py",
     ".js",
@@ -96,7 +101,9 @@ def _chunks_tree_sitter(path: Path, source: str) -> list[CodeChunk] | None:
 
     try:
         parser = get_parser(lang)
-    except Exception:
+    except Exception as exc:
+        _metrics.increment("parse_error")
+        _log.log("parse", "WARN", f"tree-sitter parser for {lang} failed: {exc}")
         return None
 
     tree = parser.parse(source.encode("utf-8"))
@@ -186,7 +193,9 @@ def _chunks_regex(path: Path, source: str) -> list[CodeChunk]:
 def extract_chunks(path: Path, root: Path) -> list[CodeChunk]:
     try:
         source = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
+    except (OSError, UnicodeDecodeError) as exc:
+        _metrics.increment("parse_error")
+        _log.log("parse", "WARN", f"Failed to read {path}: {exc}")
         return []
 
     rel_path = path.relative_to(root)
