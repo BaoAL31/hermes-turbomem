@@ -15,32 +15,22 @@ _store = MemoryStore(_config, _embedder)
 
 
 @mcp.tool()
-def remember(
-    text: str,
-    category: str = "general",
-    project_path: str | None = None,
-) -> str:
-    """Store a learned fact, preference, fix, or convention in persistent memory."""
-    return _store.remember(text=text, category=category, project_path=project_path)
-
-
-@mcp.tool()
-def index_project(path: str, force: bool = False) -> str:
-    """Index a project directory: parse code symbols, embed, and store Code Entries."""
+def index_codebase(path: str, force: bool = False) -> str:
+    """Index a project root: parse code symbols, embed, and store Code Entries."""
     return _store.index_project(path=path, force=force)
 
 
 @mcp.tool()
-def recall_memory(
+def code_recall(
     query: str,
     limit: int | None = None,
     project_path: str | None = None,
     project_id: str | None = None,
-    types: list[str] | None = None,
 ) -> str:
     """
-    Unified semantic recall over experiences and code entries across all indexed projects.
-    Optional filters: project_id, types (experience, code), or project_path for auto-index.
+    Semantic code recall over Code Entries across indexed projects.
+    Optional filters: project_id or project_path to narrow scope.
+    Returns ranked hits or no-hit guidance.
     """
     resolved_id = project_id
     if project_path and not resolved_id:
@@ -49,13 +39,53 @@ def recall_memory(
         query=query,
         limit=limit,
         project_id=resolved_id,
-        types=types,
+        types=["code"],
         project_path=project_path,
     )
 
 
 @mcp.tool()
-def list_projects() -> str:
+def code_peek(
+    query: str,
+    limit: int | None = None,
+    project_path: str | None = None,
+    project_id: str | None = None,
+) -> str:
+    """
+    Metadata-only code recall: returns path, symbol, line range—no source body.
+    Optional filters: project_id or project_path to narrow scope.
+    """
+    resolved_id = project_id
+    if project_path and not resolved_id:
+        resolved_id = resolve_project(project_path).project_id
+    return _store.code_peek(
+        query=query,
+        limit=limit,
+        project_id=resolved_id,
+        project_path=project_path,
+    )
+
+
+@mcp.tool()
+def index_health_check(
+    project_path: str | None = None,
+    project_id: str | None = None,
+) -> str:
+    """Remove stale Code Entries for deleted/renamed files. Reports cleanup counts."""
+    return _store.health_check(project_id=project_id, project_path=project_path)
+
+
+@mcp.tool()
+def index_status(
+    project_path: str | None = None,
+    project_id: str | None = None,
+) -> str:
+    """Report index readiness, entry counts per project, embedding model state."""
+    return _store.index_status(project_id=project_id, project_path=project_path)
+
+
+@mcp.tool()
+def list_code_projects() -> str:
     """List indexed projects and their root paths."""
     return _store.list_projects()
 

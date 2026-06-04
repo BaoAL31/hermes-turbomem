@@ -183,6 +183,30 @@ def _chunks_regex(path: Path, source: str) -> list[CodeChunk]:
     return chunks
 
 
+_CALLEE_BLACKLIST = frozenset({
+    "if", "elif", "else", "for", "while", "with", "try", "except",
+    "finally", "def", "class", "return", "yield", "raise", "assert",
+    "pass", "del", "print", "len", "range", "is", "in", "not", "and",
+    "or", "self", "True", "False", "None", "type", "super", "isinstance",
+    "hasattr", "int", "str", "float", "bool", "list", "dict", "tuple",
+    "set", "object", "open", "import", "from", "as",
+})
+
+
+def find_callees(chunk_text: str, caller_name: str, project_symbols: set[str]) -> set[str]:
+    """Find calls to known project symbols within chunk text."""
+    callees: set[str] = set()
+    for m in re.finditer(r"(?<!\w)(\w+)\s*\(", chunk_text):
+        name = m.group(1)
+        if (
+            name != caller_name
+            and name not in _CALLEE_BLACKLIST
+            and name in project_symbols
+        ):
+            callees.add(name)
+    return callees
+
+
 def extract_chunks(path: Path, root: Path) -> list[CodeChunk]:
     try:
         source = path.read_text(encoding="utf-8")
@@ -194,3 +218,6 @@ def extract_chunks(path: Path, root: Path) -> list[CodeChunk]:
     if ts_chunks:
         return ts_chunks
     return _chunks_regex(rel_path, source)
+
+
+
