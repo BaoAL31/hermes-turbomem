@@ -9,6 +9,7 @@ from typing import Literal
 import numpy as np
 from turbovec import IdMapIndex
 
+from hermes_turbomem.bm25 import BM25Index, rrf_fuse
 from hermes_turbomem.code_index import extract_chunks, file_content_hash, iter_indexable_files
 from hermes_turbomem.config import TurbomemConfig
 from hermes_turbomem.embedder import Embedder
@@ -33,6 +34,7 @@ class MemoryStore:
         self._init_schema()
         self._index = self._load_index()
         self._next_id = self._allocate_next_id()
+        self._bm25_index: BM25Index | None = None
         self._bm25_dirty = True
 
     def _init_schema(self) -> None:
@@ -175,6 +177,57 @@ class MemoryStore:
     def _ensure_index(self) -> None:
         if self._index.dim is None:
             self._index = IdMapIndex(dim=self.embedder.dimension, bit_width=self.config.bit_width)
+
+    def _build_bm25_index(self, project_id: str | None = None) -> BM25Index:
+        if self._bm25_index is not None and not self._bm25_dirty:
+            return self._bm25_index
+
+        if project_id:
+            rows = self._conn.execute(
+                "SELECT id, text, symbol FROM entries WHERE entry_type = 'code' AND project_id = ?",
+                (project_id,),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT id, text, symbol FROM entries WHERE entry_type = 'code'",
+            ).fetchall()
+
+        bm25 = BM25Index()
+        for row in rows:
+            bm25.add_document(int(row["id"]), row["text"] or "", row["symbol"])
+        self._bm25_index = bm25
+        self._bm25_dirty = False
+        return bm25
+
+    def _hybrid_search(
+        self,
+        query_vec: np.ndarray,
+        query_text: str,
+        k: int,
+        allowlist: np.ndarray | None = None,
+        project_id: str | None = None,
+    ) -> list[tuple[int, float, float, bool]]:
+        semantic_k = k * 3
+        scores, ids = self._index.search(query_vec, k=semantic_k, allowlist=allowlist)
+        semantic_results: list[tuple[int, float]] = []
+        if ids.size > 0:
+            semantic_results = [
+                (int(eid), float(sc)) for eid, sc in zip(ids[0].tolist(), scores[0].tolist(), strict=False)
+            ]
+
+        bm25 = self._build_bm25_index(project_id=project_id)
+        bm25_results = bm25.search(query_text, top_k=semantic_k)
+        fused = rrf_fuse(semantic_results, bm25_results)
+
+        semantic_lookup = {eid: sc for eid, sc in semantic_results}
+        threshold = self.config.confidence_threshold
+
+        results: list[tuple[int, float, float, bool]] = []
+        for eid, rrf_score in fused[:k]:
+            sem_score = semantic_lookup.get(eid, 0.0)
+            is_low = sem_score < threshold
+            results.append((int(eid), float(sem_score), float(rrf_score), is_low))
+        return results
 
     def _insert_vectors(self, entry_ids: list[int], texts: list[str]) -> None:
         if not texts:
@@ -373,13 +426,16 @@ class MemoryStore:
     def index_codebase(self, path: str, force: bool = False) -> str:
         return self.index_project(path, force)
 
-    def code_recall(
+    def _code_search(
         self,
         query: str,
-        limit: int | None = None,
-        project_id: str | None = None,
-        project_path: str | None = None,
+        limit: int | None,
+        project_id: str | None,
+        project_path: str | None,
+        *,
+        peek: bool = False,
     ) -> str:
+        self.maybe_auto_index(project_path)
         if not self._conn.execute("SELECT 1 FROM projects LIMIT 1").fetchone():
             return "No projects indexed yet. Use index_codebase(path) first."
         if not query.strip():
@@ -389,16 +445,65 @@ class MemoryStore:
             return err
         if project_path and not project_id:
             project_id = resolve_project(project_path).project_id
-        result = self.recall(
-            query=query,
-            limit=limit,
-            project_id=project_id,
-            project_path=project_path,
-            types=["code"],
+
+        k = limit or self.config.default_recall_limit
+        if len(self._index) == 0:
+            empty = "No matching Code Entries." if peek else "No matching memories found."
+            return empty + self._no_hit_suffix()
+
+        query_vec = self.embedder.encode([query.strip()])
+        clauses = ["entry_type = 'code'"]
+        params: list[object] = []
+        if project_id:
+            clauses.append("project_id = ?")
+            params.append(project_id)
+        rows = self._conn.execute(
+            f"SELECT id FROM entries WHERE {' AND '.join(clauses)}",
+            params,
+        ).fetchall()
+        if not rows:
+            return "No entries match the requested filters." + self._no_hit_suffix()
+        allowlist = np.array([int(r["id"]) for r in rows], dtype=np.uint64)
+
+        results = self._hybrid_search(
+            query_vec, query.strip(), k, allowlist=allowlist, project_id=project_id
         )
-        if "No matching" in result or "No entries match" in result:
-            return result + self._no_hit_suffix()
-        return result
+        if not results:
+            empty = "No matching Code Entries." if peek else "No matching memories found."
+            return empty + self._no_hit_suffix()
+
+        lines: list[str] = []
+        for eid, sem_score, _rrf_score, is_low in results:
+            row = self._entry_row(int(eid))
+            if row is None:
+                continue
+            if peek:
+                lines.append(self._format_peek_hit(row, sem_score, is_low=is_low))
+            else:
+                lines.append(self._format_hit(row, sem_score, is_low=is_low))
+
+        if not lines:
+            empty = "No matching Code Entries." if peek else "No matching memories found."
+            return empty + self._no_hit_suffix()
+        return "\n\n".join(lines)
+
+    def code_recall(
+        self,
+        query: str,
+        limit: int | None = None,
+        project_id: str | None = None,
+        project_path: str | None = None,
+    ) -> str:
+        return self._code_search(query, limit, project_id, project_path, peek=False)
+
+    def code_peek(
+        self,
+        query: str,
+        limit: int | None = None,
+        project_id: str | None = None,
+        project_path: str | None = None,
+    ) -> str:
+        return self._code_search(query, limit, project_id, project_path, peek=True)
 
     def _entry_row(self, entry_id: int) -> sqlite3.Row | None:
         return self._conn.execute("SELECT * FROM entries WHERE id = ?", (entry_id,)).fetchone()
@@ -466,7 +571,8 @@ class MemoryStore:
             return "No matching memories found."
         return "\n\n".join(lines)
 
-    def _format_hit(self, row: sqlite3.Row, score: float) -> str:
+    def _format_hit(self, row: sqlite3.Row, score: float, is_low: bool = False) -> str:
+        low_flag = " [LOW-CONFIDENCE]" if is_low else ""
         entry_type = row["entry_type"]
         if entry_type == "code":
             proj = row["project_id"] or "unknown"
@@ -474,15 +580,33 @@ class MemoryStore:
             loc = f"{row['path']}:{row['start_line']}-{row['end_line']}"
             preview = (row["text"] or "")[:400]
             return (
-                f"[code | {proj} | score {score:.3f}]\n"
+                f"[code | {proj} | score {score:.3f}{low_flag}]\n"
                 f"{sym} @ {loc}\n"
                 f"{preview}"
             )
         cat = row["category"] or "general"
         proj = f" | {row['project_id']}" if row["project_id"] else ""
         return (
-            f"[experience | {cat}{proj} | score {score:.3f}]\n"
+            f"[experience | {cat}{proj} | score {score:.3f}{low_flag}]\n"
             f"{row['text']}"
+        )
+
+    def _format_peek_hit(self, row: sqlite3.Row, score: float, is_low: bool = False) -> str:
+        low_flag = " [LOW-CONFIDENCE]" if is_low else ""
+        entry_type = row["entry_type"]
+        if entry_type == "code":
+            proj = row["project_id"] or "unknown"
+            sym = row["symbol"] or "(file)"
+            loc = f"{row['path']}:{row['start_line']}-{row['end_line']}"
+            return (
+                f"[code | {proj} | score {score:.3f}{low_flag}]\n"
+                f"{sym} @ {loc}"
+            )
+        cat = row["category"] or "general"
+        proj = f" | {row['project_id']}" if row["project_id"] else ""
+        return (
+            f"[experience | {cat}{proj} | score {score:.3f}{low_flag}]\n"
+            f"(peek)"
         )
 
     def list_projects(self) -> str:
