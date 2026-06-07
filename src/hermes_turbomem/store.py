@@ -461,11 +461,11 @@ class MemoryStore:
         *,
         peek: bool = False,
     ) -> str:
-        self.maybe_auto_index(project_path)
-        if not self._conn.execute("SELECT 1 FROM projects LIMIT 1").fetchone():
-            return "No projects indexed yet. Use index_codebase(path) first."
         if not query.strip():
             return "Query is empty."
+        self.maybe_auto_index(project_path)
+        if not self._conn.execute("SELECT 1 FROM projects LIMIT 1").fetchone():
+            return "No projects indexed yet. Use index_codebase(path) first." + self._no_hit_suffix()
         err = self._check_embed_config()
         if err:
             return err
@@ -488,7 +488,8 @@ class MemoryStore:
             params,
         ).fetchall()
         if not rows:
-            return "No entries match the requested filters." + self._no_hit_suffix()
+            msg = "No matching Code Entries." if peek else "No entries match the requested filters."
+            return msg + self._no_hit_suffix()
         allowlist = np.array([int(r["id"]) for r in rows], dtype=np.uint64)
 
         results = self._hybrid_search(
@@ -550,7 +551,7 @@ class MemoryStore:
 
         k = limit or self.config.default_recall_limit
         if len(self._index) == 0:
-            return "Persistent memory is empty. Use remember() or index_project() first."
+            return "No matching memories found." + self._no_hit_suffix()
 
         query_vec = self.embedder.encode([query.strip()])
         allowlist: np.ndarray | None = None
@@ -579,12 +580,12 @@ class MemoryStore:
                     if self._tags_overlap(self._decode_tags(r["tags"]), tags)
                 ]
             if not rows:
-                return "No entries match the requested filters."
+                return "No entries match the requested filters." + self._no_hit_suffix()
             allowlist = np.array([int(r["id"]) for r in rows], dtype=np.uint64)
 
         scores, ids = self._index.search(query_vec, k=k, allowlist=allowlist)
         if ids.size == 0:
-            return "No matching memories found."
+            return "No matching memories found." + self._no_hit_suffix()
 
         lines: list[str] = []
         for score, entry_id in zip(scores[0].tolist(), ids[0].tolist(), strict=False):
@@ -594,7 +595,7 @@ class MemoryStore:
             lines.append(self._format_hit(row, float(score)))
 
         if not lines:
-            return "No matching memories found."
+            return "No matching memories found." + self._no_hit_suffix()
         return "\n\n".join(lines)
 
     def _format_hit(self, row: sqlite3.Row, score: float, is_low: bool = False) -> str:
@@ -708,6 +709,124 @@ class MemoryStore:
             loc = f"{r['path']}:{r['caller_start_line']}-{r['caller_end_line']}"
             lines.append(f"  {r['caller_symbol']} @ {loc}")
         return "\n".join(lines)
+
+    def health_check(
+        self,
+        project_id: str | None = None,
+        project_path: str | None = None,
+    ) -> str:
+        if project_path and not project_id:
+            project_id = resolve_project(project_path).project_id
+
+        if project_id:
+            rows = self._conn.execute(
+                "SELECT project_id, root_path FROM projects WHERE project_id = ?",
+                (project_id,),
+            ).fetchall()
+        else:
+            rows = self._conn.execute("SELECT project_id, root_path FROM projects").fetchall()
+
+        if not rows:
+            return "No projects indexed; nothing to check."
+
+        total_entries = 0
+        total_hashes = 0
+        total_projects = 0
+        total_edges = 0
+
+        for row in rows:
+            pid = row["project_id"]
+            root = Path(row["root_path"])
+
+            if not root.is_dir():
+                entry_ids = [
+                    int(r["id"])
+                    for r in self._conn.execute(
+                        "SELECT id FROM entries WHERE project_id = ?", (pid,)
+                    ).fetchall()
+                ]
+                for eid in entry_ids:
+                    if self._index.contains(eid):
+                        self._index.remove(eid)
+                self._conn.execute("DELETE FROM entries WHERE project_id = ?", (pid,))
+                self._conn.execute("DELETE FROM file_hashes WHERE project_id = ?", (pid,))
+                self._conn.execute("DELETE FROM call_edges WHERE project_id = ?", (pid,))
+                self._conn.execute("DELETE FROM projects WHERE project_id = ?", (pid,))
+                total_projects += 1
+                continue
+
+            stale_rows = [
+                s
+                for s in self._conn.execute(
+                    """
+                    SELECT id, path FROM entries
+                    WHERE entry_type = 'code' AND path IS NOT NULL AND project_id = ?
+                    """,
+                    (pid,),
+                ).fetchall()
+                if not (root / s["path"]).is_file()
+            ]
+            stale_entry_ids = [int(s["id"]) for s in stale_rows]
+            stale_paths = {s["path"] for s in stale_rows}
+
+            if stale_entry_ids:
+                for sid in stale_entry_ids:
+                    if self._index.contains(sid):
+                        self._index.remove(sid)
+                placeholders = ",".join("?" for _ in stale_entry_ids)
+                self._conn.execute(
+                    f"DELETE FROM entries WHERE id IN ({placeholders})",
+                    stale_entry_ids,
+                )
+                total_entries += len(stale_entry_ids)
+
+            if stale_paths:
+                for stale_path in stale_paths:
+                    cur = self._conn.execute(
+                        "DELETE FROM call_edges WHERE project_id = ? AND path = ?",
+                        (pid, stale_path),
+                    )
+                    total_edges += cur.rowcount
+
+            stale_hashes = [
+                h["path"]
+                for h in self._conn.execute(
+                    "SELECT path FROM file_hashes WHERE project_id = ?", (pid,)
+                ).fetchall()
+                if not (root / h["path"]).is_file()
+            ]
+            if stale_hashes:
+                placeholders = ",".join("?" for _ in stale_hashes)
+                self._conn.execute(
+                    f"DELETE FROM file_hashes WHERE project_id = ? AND path IN ({placeholders})",
+                    (pid, *stale_hashes),
+                )
+                total_hashes += len(stale_hashes)
+
+        self._conn.commit()
+        self._persist_index()
+        self._bm25_dirty = True
+
+        parts = []
+        if total_entries:
+            parts.append(f"{total_entries} stale Code Entries")
+        if total_hashes:
+            parts.append(f"{total_hashes} orphaned file hashes")
+        if total_edges:
+            parts.append(f"{total_edges} stale call graph edges")
+        if total_projects:
+            parts.append(f"{total_projects} absent project(s) removed")
+
+        if not parts:
+            return "Index health check complete: no stale entries found."
+        return "Index health check complete. Removed " + ", ".join(parts) + "."
+
+    def index_health_check(
+        self,
+        project_id: str | None = None,
+        project_path: str | None = None,
+    ) -> str:
+        return self.health_check(project_id=project_id, project_path=project_path)
 
     def list_projects(self) -> str:
         rows = self._conn.execute(
