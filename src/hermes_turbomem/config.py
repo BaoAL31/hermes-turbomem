@@ -32,20 +32,25 @@ class TurbomemConfig:
         return self.data_dir / CONFIG_FILENAME
 
 
-def load_config() -> TurbomemConfig:
-    data_dir = Path(os.environ.get("TURBOMEM_DATA_DIR", DEFAULT_DATA_DIR))
-    config_path = data_dir / CONFIG_FILENAME
-    cfg = TurbomemConfig(data_dir=data_dir)
+def _apply_yaml(cfg: TurbomemConfig, raw: dict) -> TurbomemConfig:
+    if "data_dir" in raw:
+        cfg.data_dir = Path(raw["data_dir"]).expanduser()
+    cfg.auto_index_on_first_use = bool(raw.get("auto_index_on_first_use", cfg.auto_index_on_first_use))
+    cfg.embedding_model = str(raw.get("embedding_model", cfg.embedding_model))
+    cfg.bit_width = int(raw.get("bit_width", cfg.bit_width))
+    cfg.default_recall_limit = int(raw.get("default_recall_limit", cfg.default_recall_limit))
+    cfg.confidence_threshold = float(raw.get("confidence_threshold", cfg.confidence_threshold))
+    return cfg
+
+
+def load_config(data_dir: Path | None = None) -> TurbomemConfig:
+    resolved = data_dir or Path(os.environ.get("TURBOMEM_DATA_DIR", DEFAULT_DATA_DIR))
+    config_path = resolved / CONFIG_FILENAME
+    cfg = TurbomemConfig(data_dir=resolved)
 
     if config_path.is_file():
         raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-        if "data_dir" in raw:
-            cfg.data_dir = Path(raw["data_dir"]).expanduser()
-        cfg.auto_index_on_first_use = bool(raw.get("auto_index_on_first_use", False))
-        cfg.embedding_model = str(raw.get("embedding_model", cfg.embedding_model))
-        cfg.bit_width = int(raw.get("bit_width", cfg.bit_width))
-        cfg.default_recall_limit = int(raw.get("default_recall_limit", cfg.default_recall_limit))
-        cfg.confidence_threshold = float(raw.get("confidence_threshold", cfg.confidence_threshold))
+        cfg = _apply_yaml(cfg, raw)
 
     cfg.data_dir.mkdir(parents=True, exist_ok=True)
     return cfg
