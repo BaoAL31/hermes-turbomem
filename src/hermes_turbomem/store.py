@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 from pathlib import Path
@@ -57,6 +58,46 @@ class MemoryStore:
             """
         )
         self._conn.commit()
+        try:
+            self._conn.execute("ALTER TABLE entries ADD COLUMN tags TEXT")
+            self._conn.commit()
+        except sqlite3.OperationalError:
+            pass
+
+    @staticmethod
+    def _encode_tags(tags: list[str] | None) -> str | None:
+        if not tags:
+            return None
+        normalized = []
+        seen: set[str] = set()
+        for tag in tags:
+            t = str(tag).strip()
+            if t and t not in seen:
+                seen.add(t)
+                normalized.append(t)
+        return json.dumps(normalized) if normalized else None
+
+    @staticmethod
+    def _decode_tags(raw: str | None) -> list[str]:
+        if not raw:
+            return []
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                return [str(t) for t in parsed if str(t).strip()]
+        except json.JSONDecodeError:
+            pass
+        return []
+
+    @staticmethod
+    def _tags_overlap(entry_tags: list[str], filter_tags: list[str] | None) -> bool:
+        if not filter_tags:
+            return True
+        wanted = {str(t).strip() for t in filter_tags if str(t).strip()}
+        if not wanted:
+            return True
+        stored = {str(t).strip() for t in entry_tags if str(t).strip()}
+        return bool(wanted & stored)
 
     def _load_index(self) -> IdMapIndex:
         if self.config.index_path.is_file():
@@ -109,6 +150,7 @@ class MemoryStore:
         text: str,
         category: str = "general",
         project_path: str | None = None,
+        tags: list[str] | None = None,
     ) -> str:
         self.maybe_auto_index(project_path)
         project_id = None
@@ -120,14 +162,47 @@ class MemoryStore:
         now = time.time()
         self._conn.execute(
             """
-            INSERT INTO entries (id, entry_type, project_id, text, category, created_at)
-            VALUES (?, 'experience', ?, ?, ?, ?)
+            INSERT INTO entries (id, entry_type, project_id, text, category, tags, created_at)
+            VALUES (?, 'experience', ?, ?, ?, ?, ?)
             """,
-            (entry_id, project_id, text.strip(), category, now),
+            (entry_id, project_id, text.strip(), category, self._encode_tags(tags), now),
         )
         self._conn.commit()
         self._insert_vector(entry_id, text.strip())
         return f"Stored experience #{entry_id}" + (f" for project {project_id}" if project_id else "")
+
+    def list_experiences(
+        self,
+        limit: int = 20,
+        category: str | None = None,
+        tags: list[str] | None = None,
+    ) -> str:
+        clauses = ["entry_type = 'experience'"]
+        params: list[object] = []
+        if category:
+            clauses.append("category = ?")
+            params.append(category)
+        rows = self._conn.execute(
+            f"""
+            SELECT id, category, text, tags, created_at FROM entries
+            WHERE {' AND '.join(clauses)}
+            ORDER BY created_at DESC
+            """,
+            params,
+        ).fetchall()
+        if tags:
+            rows = [
+                r
+                for r in rows
+                if self._tags_overlap(self._decode_tags(r["tags"]), tags)
+            ]
+        rows = rows[:limit]
+        if not rows:
+            if tags:
+                return "No experiences match the requested tags."
+            return "No experiences stored."
+        lines = [f"- #{r['id']} [{r['category']}] {r['text'][:200]}" for r in rows]
+        return f"{len(rows)} experience(s):\n" + "\n".join(lines)
 
     def index_project(self, path: str, force: bool = False) -> str:
         info = resolve_project(path)
@@ -243,6 +318,8 @@ class MemoryStore:
         project_id: str | None = None,
         types: list[str] | None = None,
         project_path: str | None = None,
+        exclude_categories: list[str] | None = None,
+        tags: list[str] | None = None,
     ) -> str:
         self.maybe_auto_index(project_path)
         if not query.strip():
@@ -254,7 +331,7 @@ class MemoryStore:
 
         query_vec = self.embedder.encode([query.strip()])
         allowlist: np.ndarray | None = None
-        if project_id or types:
+        if project_id or types or exclude_categories or tags:
             clauses = ["1=1"]
             params: list[object] = []
             if project_id:
@@ -264,10 +341,20 @@ class MemoryStore:
                 placeholders = ",".join("?" for _ in types)
                 clauses.append(f"entry_type IN ({placeholders})")
                 params.extend(types)
+            if exclude_categories:
+                placeholders = ",".join("?" for _ in exclude_categories)
+                clauses.append(f"(category IS NULL OR category NOT IN ({placeholders}))")
+                params.extend(exclude_categories)
             rows = self._conn.execute(
-                f"SELECT id FROM entries WHERE {' AND '.join(clauses)}",
+                f"SELECT id, tags FROM entries WHERE {' AND '.join(clauses)}",
                 params,
             ).fetchall()
+            if tags:
+                rows = [
+                    r
+                    for r in rows
+                    if self._tags_overlap(self._decode_tags(r["tags"]), tags)
+                ]
             if not rows:
                 return "No entries match the requested filters."
             allowlist = np.array([int(r["id"]) for r in rows], dtype=np.uint64)
@@ -311,7 +398,10 @@ class MemoryStore:
             "SELECT project_id, root_path, indexed_at FROM projects ORDER BY indexed_at DESC"
         ).fetchall()
         if not rows:
-            return "No projects indexed yet."
+            return (
+                "No projects indexed yet.\n\n"
+                "Use index_codebase(<path>) to add a project to the catalog."
+            )
         lines = []
         for row in rows:
             when = (
@@ -320,4 +410,97 @@ class MemoryStore:
                 else "never"
             )
             lines.append(f"- {row['project_id']}\n  root: {row['root_path']}\n  indexed: {when}")
+        return "\n".join(lines)
+
+    def list_code_projects(self) -> str:
+        return self.list_projects()
+
+    def index_status(
+        self,
+        project_id: str | None = None,
+        project_path: str | None = None,
+    ) -> str:
+        from hermes_turbomem.embedder import is_model_cached
+
+        if project_path and not project_id:
+            project_id = resolve_project(project_path).project_id
+
+        if project_id:
+            project_row = self._conn.execute(
+                "SELECT project_id, root_path, indexed_at FROM projects WHERE project_id = ?",
+                (project_id,),
+            ).fetchone()
+            if project_row is None:
+                return (
+                    f"Project '{project_id}' is not in the catalog.\n\n"
+                    "Use index_codebase(<path>) to index it."
+                )
+            code_count = int(
+                self._conn.execute(
+                    "SELECT COUNT(*) FROM entries WHERE project_id = ? AND entry_type = 'code'",
+                    (project_id,),
+                ).fetchone()[0]
+            )
+            exp_count = int(
+                self._conn.execute(
+                    "SELECT COUNT(*) FROM entries WHERE project_id = ? AND entry_type = 'experience'",
+                    (project_id,),
+                ).fetchone()[0]
+            )
+            when = (
+                time.strftime("%Y-%m-%d %H:%M", time.localtime(project_row["indexed_at"]))
+                if project_row["indexed_at"]
+                else "never"
+            )
+            cached = is_model_cached(self.config.embedding_model)
+            lines = [
+                f"Index status for {project_id}:",
+                f"  Root: {project_row['root_path']}",
+                f"  Last indexed: {when}",
+                f"  Code entries: {code_count}",
+                f"  Experiences: {exp_count}",
+                f"  Embed model '{self.config.embedding_model}': {'cached' if cached else 'not cached'}",
+            ]
+            if code_count == 0:
+                lines.append("")
+                lines.append("No code entries yet. Re-run index_codebase(<path>) if indexing failed.")
+            if not cached:
+                lines.append("Embedding model not cached. Use preload_models() before offline use.")
+            return "\n".join(lines)
+
+        project_count = int(
+            self._conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0]
+        )
+        code_count = int(
+            self._conn.execute(
+                "SELECT COUNT(*) FROM entries WHERE entry_type = 'code'"
+            ).fetchone()[0]
+        )
+        exp_count = int(
+            self._conn.execute(
+                "SELECT COUNT(*) FROM entries WHERE entry_type = 'experience'"
+            ).fetchone()[0]
+        )
+        row = self._conn.execute("SELECT MAX(indexed_at) FROM projects").fetchone()
+        last_indexed = row[0] if row[0] is not None else None
+        cached = is_model_cached(self.config.embedding_model)
+
+        lines = [
+            "Index status:",
+            f"  Data dir: {self.config.data_dir}",
+            f"  Database: {project_count} project(s), {code_count} code entry/chunk(s), {exp_count} experience(s)",
+            f"  Embed model '{self.config.embedding_model}': {'cached' if cached else 'not cached'}",
+        ]
+        if last_indexed is not None:
+            lines.append(
+                f"  Last indexed: {time.strftime('%Y-%m-%d %H:%M', time.localtime(last_indexed))}"
+            )
+        else:
+            lines.append("  Last indexed: never")
+
+        if project_count == 0:
+            lines.append("")
+            lines.append("No projects indexed yet. Use index_codebase(<path>) to index a project.")
+        if not cached:
+            lines.append("Embedding model not cached. Use preload_models() to download before offline use.")
         return "\n".join(lines)

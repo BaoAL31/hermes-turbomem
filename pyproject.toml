@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "hermes-turbomem"
 version = "0.1.0"
-description = "Local MCP persistent memory for Hermes: TurboQuant vectors + unified recall over experiences and code."
+description = "Local Hermes memory provider: TurboQuant vectors + hybrid recall over experiences and code. No cloud API required."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
@@ -23,6 +23,14 @@ index = [
   "tree-sitter>=0.24.0",
   "tree-sitter-languages>=1.10.0",
 ]
+dev = [
+  "pytest>=8.0.0",
+  "huggingface-hub>=0.20.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "plugins/memory"]
 
 [project.scripts]
 hermes-turbomem = "hermes_turbomem.server:main"

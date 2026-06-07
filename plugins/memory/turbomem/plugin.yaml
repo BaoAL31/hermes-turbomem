@@ -1,0 +1,7 @@
+name: turbomem
+version: 0.2.0
+description: "Local hybrid memory for Hermes — TurboQuant vectors + BM25 over experiences and code. No cloud API required."
+hooks:
+  - on_session_end
+pip_dependencies:
+  - hermes-turbomem[index]
