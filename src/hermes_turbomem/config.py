@@ -17,6 +17,7 @@ class TurbomemConfig:
     embedding_model: str = "nomic-ai/nomic-embed-text-v1"
     bit_width: int = 4
     default_recall_limit: int = 8
+    confidence_threshold: float = 0.3
 
     @property
     def index_path(self) -> Path:
@@ -44,6 +45,7 @@ def load_config() -> TurbomemConfig:
         cfg.embedding_model = str(raw.get("embedding_model", cfg.embedding_model))
         cfg.bit_width = int(raw.get("bit_width", cfg.bit_width))
         cfg.default_recall_limit = int(raw.get("default_recall_limit", cfg.default_recall_limit))
+        cfg.confidence_threshold = float(raw.get("confidence_threshold", cfg.confidence_threshold))
 
     cfg.data_dir.mkdir(parents=True, exist_ok=True)
     return cfg
