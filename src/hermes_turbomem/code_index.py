@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import re
+import subprocess
 from dataclasses import dataclass
+from fnmatch import fnmatch
 from pathlib import Path
+
+import pathspec
 
 CODE_EXTENSIONS = {
     ".py",
@@ -22,7 +26,7 @@ CODE_EXTENSIONS = {
     ".hpp",
 }
 
-SKIP_DIRS = {
+DENY_PATTERNS = [
     ".git",
     ".hg",
     ".svn",
@@ -30,13 +34,43 @@ SKIP_DIRS = {
     "__pycache__",
     ".venv",
     "venv",
-    "dist",
-    "build",
-    "target",
     ".tox",
     ".mypy_cache",
     ".pytest_cache",
-}
+    ".ruff_cache",
+    "dist",
+    "build",
+    "target",
+    "bin",
+    "obj",
+    ".next",
+    ".nuxt",
+    "*.pyc",
+    "*.pyo",
+    "*.so",
+    "*.dll",
+    "*.dylib",
+    "*.exe",
+    "*.bin",
+    "*.class",
+    "*.o",
+    "*.obj",
+    "*.min.js",
+    "*.min.css",
+    "*.map",
+    ".env",
+    ".env.*",
+    "*.lock",
+    "package-lock.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "Gemfile.lock",
+    "poetry.lock",
+    ".turbomem",
+]
+
+MAX_FILE_SIZE = 512_000
+MAX_CHUNKS_PER_FILE = 200
 
 TS_LANGUAGE_MAP = {
     ".py": "python",
@@ -70,17 +104,107 @@ def file_content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def iter_source_files(root: Path) -> list[Path]:
+def _run_git(args: list[str], cwd: Path) -> str | None:
+    try:
+        out = subprocess.run(
+            ["git", *args],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=10,
+        )
+        return out.stdout.strip() or None
+    except (subprocess.SubprocessError, FileNotFoundError):
+        return None
+
+
+def _find_git_root(root: Path) -> Path | None:
+    for parent in [root, *root.parents]:
+        if (parent / ".git").is_dir():
+            return parent
+    if (root / ".git").is_file():
+        return root
+    return None
+
+
+def _load_gitignore_spec(root: Path) -> pathspec.PathSpec:
+    patterns: list[str] = []
+    for name in (".gitignore", ".turbomemignore"):
+        path = root / name
+        if path.is_file():
+            try:
+                patterns.extend(path.read_text(encoding="utf-8").splitlines())
+            except (OSError, UnicodeDecodeError):
+                pass
+    return pathspec.GitIgnoreSpec.from_lines(patterns)
+
+
+def _is_denied(rel_path: str) -> bool:
+    for pattern in DENY_PATTERNS:
+        if pattern.startswith("*"):
+            if rel_path.endswith(pattern[1:]):
+                return True
+        elif pattern.endswith("/"):
+            if pattern[:-1] in rel_path.split("/"):
+                return True
+        elif pattern in rel_path.split("/"):
+            return True
+        elif fnmatch(rel_path, pattern):
+            return True
+    return False
+
+
+def iter_indexable_files(root: Path) -> list[Path]:
+    root = root.resolve()
     files: list[Path] = []
-    for path in root.rglob("*"):
+    git_root = _find_git_root(root)
+
+    if git_root:
+        tracked = _run_git(["ls-files"], git_root)
+        if tracked is not None:
+            for raw in tracked.splitlines():
+                full = (git_root / raw).resolve()
+                if not full.is_file():
+                    continue
+                if full.suffix.lower() not in CODE_EXTENSIONS:
+                    continue
+                try:
+                    if full.stat().st_size > MAX_FILE_SIZE:
+                        continue
+                except OSError:
+                    continue
+                if _is_denied(raw):
+                    continue
+                files.append(full)
+            files.sort(key=lambda p: p.relative_to(root).as_posix())
+            return files
+
+    spec = _load_gitignore_spec(root)
+    for path in sorted(root.rglob("*")):
         if not path.is_file():
+            continue
+        try:
+            rel = path.relative_to(root).as_posix()
+        except ValueError:
             continue
         if path.suffix.lower() not in CODE_EXTENSIONS:
             continue
-        if any(part in SKIP_DIRS for part in path.parts):
+        if _is_denied(rel):
+            continue
+        if spec.match_file(rel):
+            continue
+        try:
+            if path.stat().st_size > MAX_FILE_SIZE:
+                continue
+        except OSError:
             continue
         files.append(path)
-    return sorted(files)
+    return files
+
+
+def iter_source_files(root: Path) -> list[Path]:
+    return iter_indexable_files(root)
 
 
 def _chunks_tree_sitter(path: Path, source: str) -> list[CodeChunk] | None:
@@ -192,5 +316,5 @@ def extract_chunks(path: Path, root: Path) -> list[CodeChunk]:
     rel_path = path.relative_to(root)
     ts_chunks = _chunks_tree_sitter(rel_path, source)
     if ts_chunks:
-        return ts_chunks
-    return _chunks_regex(rel_path, source)
+        return ts_chunks[:MAX_CHUNKS_PER_FILE]
+    return _chunks_regex(rel_path, source)[:MAX_CHUNKS_PER_FILE]

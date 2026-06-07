@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import subprocess
 import sys
 import types
 from pathlib import Path
 
 import pytest
 
+FIXTURES = Path(__file__).parent / "fixtures"
+
 from hermes_turbomem.config import TurbomemConfig
 from hermes_turbomem.store import MemoryStore
 
-from tests.fake_embedder import FakeEmbedder
+from fake_embedder import FakeEmbedder
 
 
 def _install_agent_stub() -> None:
@@ -46,3 +49,18 @@ def turbomem_config(hermes_home: Path) -> TurbomemConfig:
 @pytest.fixture
 def store(turbomem_config: TurbomemConfig) -> MemoryStore:
     return MemoryStore(turbomem_config, FakeEmbedder())
+
+
+@pytest.fixture
+def sample_repo() -> Path:
+    repo = FIXTURES / "sample_repo"
+    if not (repo / ".git").exists():
+        subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-c", "user.email=fixture@test", "-c", "user.name=fixture", "commit", "-m", "fixture"],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+        )
+    return repo
