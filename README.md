@@ -12,7 +12,7 @@ Local **persistent memory** for [Hermes Agent](https://github.com/NousResearch/h
 | [docs/backlog.md](./docs/backlog.md) | Integration + provider work queue (B-01…) |
 | [docs/PRD-v2-memory-provider.md](./docs/PRD-v2-memory-provider.md) | Current product spec (provider-first) |
 | [docs/adr/0002-hermes-memory-provider-local-only.md](./docs/adr/0002-hermes-memory-provider-local-only.md) | Architecture decision |
-| [docs/PRD-v1-global-code-memory-mcp.md](./docs/PRD-v1-global-code-memory-mcp.md) | Historical MCP-only scope |
+| [docs/skills/hermes-memory-routing.md](./docs/skills/hermes-memory-routing.md) | Agent tool routing (provider v2) |
 
 ## Quick start (Hermes memory provider — recommended)
 
@@ -44,8 +44,15 @@ Data directory: `~/.hermes/turbomem/` (profile-scoped). **Cost: $0** recurring (
 | Tool | Purpose |
 |------|---------|
 | `memory_store` | Experiences: `retain`, `recall`, `list` |
-| `index_codebase` | Index a repository |
-| `code_recall` / … | Code tools (see PRD v2) |
+| `index_codebase` | Index a repository into the global store |
+| `code_recall` | Hybrid code search |
+| `code_peek` | Metadata-only code hits |
+| `code_call_graph` | Callers / callees |
+| `list_code_projects` | Indexed project catalog |
+| `index_status`, `index_health_check` | Diagnostics |
+| `preload_models` | Cache embedding weights locally |
+
+Routing skill: [docs/skills/hermes-memory-routing.md](./docs/skills/hermes-memory-routing.md)
 
 Auto **prefetch** before turns and background **retain** after turns follow the [Holographic / Hindsight plugin patterns](docs/references.md) — see `plugins/memory/turbomem/__init__.py`.
 
