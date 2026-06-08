@@ -2,8 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
-from tree_sitter import Node
+try:
+    from tree_sitter import Node
+except Exception:  # pragma: no cover - optional dependency
+    Node = Any
 
 try:
     from tree_sitter_languages import get_parser
