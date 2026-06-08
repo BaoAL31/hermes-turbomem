@@ -4,7 +4,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from tree_sitter import Node
-from tree_sitter_languages import get_parser
+
+try:
+    from tree_sitter_languages import get_parser
+except Exception:  # pragma: no cover - optional dependency
+    get_parser = None
 
 from hermes_turbomem.code_index import TS_LANGUAGE_MAP
 
@@ -167,6 +171,8 @@ def extract_edges(path: Path, source: str) -> list[CallEdge] | None:
     call_type = _CALL_TYPES.get(lang)
     if call_type is None:
         return None
+    if get_parser is None:
+        return _extract_edges_regex(source, lang)
     try:
         parser = get_parser(lang)
         tree = parser.parse(source.encode("utf-8"))
