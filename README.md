@@ -57,16 +57,34 @@ pip install -e ".[index]"
 
 ## Config
 
-`~/.hermes/turbomem/config.yaml` (optional):
+Two files under `$HERMES_HOME/turbomem/`:
+
+**`config.yaml`** — shared store (read by `MemoryStore`):
 
 ```yaml
 auto_index_on_first_use: false
 embedding_model: nomic-ai/nomic-embed-text-v1
 bit_width: 4
 default_recall_limit: 8
+confidence_threshold: 0.3
 ```
 
-Provider-specific overrides: `~/.hermes/turbomem/provider.yaml` (via `hermes memory setup`).
+**`provider.yaml`** — Hermes hook knobs (via `hermes memory setup`):
+
+```yaml
+auto_retain_turns: true
+retain_every_n_turns: 1
+retain_max_chars_per_side: 1200
+recall_max_chars: 4000
+```
+
+### Manual install smoke checklist
+
+1. `pip install -e ".[index]"` from repo root
+2. Copy `plugins/memory/turbomem` → `~/.hermes/plugins/memory/turbomem`
+3. `hermes memory setup` → select **turbomem** (no API key)
+4. `hermes memory status` shows turbomem active
+5. Set `memory.provider: turbomem` in `~/.hermes/config.yaml`
 
 ## Research before you build
 

@@ -21,15 +21,8 @@ logger = logging.getLogger(__name__)
 
 
 def _load_provider_config(hermes_home: str) -> TurbomemConfig:
-    cfg = load_config()
     data_dir = Path(hermes_home) / "turbomem"
-    return TurbomemConfig(
-        data_dir=data_dir,
-        auto_index_on_first_use=cfg.auto_index_on_first_use,
-        embedding_model=cfg.embedding_model,
-        bit_width=cfg.bit_width,
-        default_recall_limit=cfg.default_recall_limit,
-    )
+    return load_config(data_dir)
 
 
 def _resolve_project_id(project_path: str | None, project_id: str | None) -> str | None:
