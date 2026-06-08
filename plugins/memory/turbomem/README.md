@@ -33,16 +33,22 @@ memory:
 
 No API keys. Data: `$HERMES_HOME/turbomem/`.
 
-## Tools
+## Tools (provider surface)
 
 | Tool | Purpose |
 |------|---------|
 | `memory_store` | Experiences: `retain`, `recall`, `list` |
-| `index_codebase`, `code_*`, `list_code_projects` | Code index + search + graph |
-| `index_status`, `index_health_check`, `index_logs`, `index_metrics` | Diagnostics |
+| `index_codebase` | Index a project into the global store |
+| `code_recall` | Hybrid code search (RRF) |
+| `code_peek` | Metadata-only code hits |
+| `code_call_graph` | Callers / callees |
+| `list_code_projects` | Project catalog |
+| `index_status` | Index readiness |
+| `index_health_check` | Stale entry cleanup |
+| `index_logs`, `index_metrics` | Diagnostics (when store supports) |
 | `preload_models` | Warm embedding cache |
 
-Full schemas in `tools.py`; handlers delegate to `MemoryStore` after B-01–B-04.
+Agent routing: [docs/skills/hermes-memory-routing.md](../../../docs/skills/hermes-memory-routing.md). Schemas in `tools.py`.
 
 ## Research
 
