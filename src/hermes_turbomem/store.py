@@ -9,12 +9,18 @@ from typing import Literal
 import numpy as np
 from turbovec import IdMapIndex
 
-from hermes_turbomem.code_index import extract_chunks, file_content_hash, iter_source_files
+from hermes_turbomem.code_index import extract_chunks, file_content_hash, iter_indexable_files
 from hermes_turbomem.config import TurbomemConfig
 from hermes_turbomem.embedder import Embedder
 from hermes_turbomem.project_id import ProjectInfo, resolve_project
 
 EntryType = Literal["experience", "code"]
+
+NO_HIT_HINTS = (
+    " Try `index_status` to check index readiness, "
+    "`index_health_check` to clean stale entries, "
+    "or re-run `index_codebase` to rebuild the index."
+)
 
 
 class MemoryStore:
@@ -27,6 +33,7 @@ class MemoryStore:
         self._init_schema()
         self._index = self._load_index()
         self._next_id = self._allocate_next_id()
+        self._bm25_dirty = True
 
     def _init_schema(self) -> None:
         self._conn.executescript(
@@ -63,6 +70,59 @@ class MemoryStore:
             self._conn.commit()
         except sqlite3.OperationalError:
             pass
+        self._conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS index_metadata (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS call_edges (
+                project_id TEXT NOT NULL,
+                path TEXT NOT NULL,
+                caller_symbol TEXT NOT NULL,
+                callee TEXT NOT NULL,
+                caller_start_line INTEGER NOT NULL,
+                caller_end_line INTEGER NOT NULL,
+                callee_line INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_call_edges_project ON call_edges(project_id);
+            CREATE INDEX IF NOT EXISTS idx_call_edges_caller ON call_edges(project_id, caller_symbol);
+            CREATE INDEX IF NOT EXISTS idx_call_edges_callee ON call_edges(project_id, callee);
+            """
+        )
+        self._conn.commit()
+
+    def _no_hit_suffix(self) -> str:
+        return NO_HIT_HINTS
+
+    def _persist_index_metadata(self) -> None:
+        for key, value in (
+            ("embedding_model", self.config.embedding_model),
+            ("bit_width", str(self.config.bit_width)),
+        ):
+            self._conn.execute(
+                """
+                INSERT INTO index_metadata (key, value) VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                (key, value),
+            )
+        self._conn.commit()
+
+    def _check_embed_config(self) -> str | None:
+        for key, current in (
+            ("embedding_model", self.config.embedding_model),
+            ("bit_width", str(self.config.bit_width)),
+        ):
+            row = self._conn.execute(
+                "SELECT value FROM index_metadata WHERE key = ?", (key,)
+            ).fetchone()
+            if row and row["value"] != current:
+                return (
+                    f"Index metadata mismatch for {key}: stored '{row['value']}', "
+                    f"config '{current}'. Re-run index_codebase with force on all projects."
+                )
+        return None
 
     @staticmethod
     def _encode_tags(tags: list[str] | None) -> str | None:
@@ -210,7 +270,8 @@ class MemoryStore:
         if not root.is_dir():
             return f"Project root not found: {root}"
 
-        files = iter_source_files(root)
+        files = iter_indexable_files(root)
+        self._bm25_dirty = True
         added = 0
         skipped = 0
         removed = 0
@@ -303,10 +364,41 @@ class MemoryStore:
         self._conn.commit()
         self._persist_index()
 
+        self._persist_index_metadata()
         return (
             f"Indexed project {info.project_id} at {root}: "
             f"{added} code entries added, {skipped} files/chunks skipped, {removed} stale entries removed."
         )
+
+    def index_codebase(self, path: str, force: bool = False) -> str:
+        return self.index_project(path, force)
+
+    def code_recall(
+        self,
+        query: str,
+        limit: int | None = None,
+        project_id: str | None = None,
+        project_path: str | None = None,
+    ) -> str:
+        if not self._conn.execute("SELECT 1 FROM projects LIMIT 1").fetchone():
+            return "No projects indexed yet. Use index_codebase(path) first."
+        if not query.strip():
+            return "Query is empty."
+        err = self._check_embed_config()
+        if err:
+            return err
+        if project_path and not project_id:
+            project_id = resolve_project(project_path).project_id
+        result = self.recall(
+            query=query,
+            limit=limit,
+            project_id=project_id,
+            project_path=project_path,
+            types=["code"],
+        )
+        if "No matching" in result or "No entries match" in result:
+            return result + self._no_hit_suffix()
+        return result
 
     def _entry_row(self, entry_id: int) -> sqlite3.Row | None:
         return self._conn.execute("SELECT * FROM entries WHERE id = ?", (entry_id,)).fetchone()

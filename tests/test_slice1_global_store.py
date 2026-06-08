@@ -6,7 +6,7 @@ import pytest
 
 from hermes_turbomem.config import TurbomemConfig
 from hermes_turbomem.store import MemoryStore
-from tests.fake_embedder import FakeEmbedder
+from fake_embedder import FakeEmbedder
 
 
 class TestGlobalStoreBootstrap:
